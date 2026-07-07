@@ -17,6 +17,13 @@ camera/user is sideways (e.g. lying down).
 """
 import threading
 import time
+
+# Support both eventlet green threads and standard threads
+try:
+    from eventlet import tpool
+    _USE_TPOOL = True
+except ImportError:
+    _USE_TPOOL = False
 from pathlib import Path
 from typing import Optional, Tuple
 

@@ -477,29 +477,80 @@ def api_process_video_download(job_id):
 # WebSocket — live frame processing
 # -----------------------------------------------------------------------
 
+# Live-frame coalescing: never build a backlog per client.
+# On CPU a frame takes ~0.5-2s. If frames arrive faster than we can swap them,
+# we keep only the NEWEST queued frame per client and drop the rest, so the
+# swapped feed stays live instead of drifting further behind the camera. The
+# client also self-limits to one in-flight frame, but this makes the guarantee
+# server-authoritative (surviving watchdog re-sends, extra tabs, reconnects).
+_frame_state = {}                       # sid -> {'busy': bool, 'pending': bytes|None}
+_frame_state_lock = threading.Lock()
+
+
+def _decode_frame(data):
+    """Accept a raw binary JPEG (ArrayBuffer) or, for older clients,
+    {image: <base64 JPEG>}. Returns JPEG bytes or None."""
+    if isinstance(data, (bytes, bytearray)):
+        return bytes(data)
+    if isinstance(data, dict):
+        b64 = data.get('image', '')
+        if not b64:
+            return None
+        if ',' in b64:
+            b64 = b64.split(',', 1)[1]
+        return base64.b64decode(b64)
+    return None
+
+
 @socketio.on('frame')
 def handle_frame(data):
     """Client sends the JPEG frame as raw binary (ArrayBuffer) — or, for older
     clients, {image: <base64 JPEG>}. Reply frame_result {image: <binary JPEG>,
-    face_found, mode}. Binary drops the ~33% base64 tax in BOTH directions and
-    the sync encode/decode that bloated the mobile round-trip."""
+    face_found, mode}. Binary drops the ~33% base64 tax in BOTH directions.
+    Only the most recent frame per client is processed — older queued frames are
+    dropped to keep latency bounded under load."""
     try:
-        if isinstance(data, (bytes, bytearray)):
-            jpg_bytes = bytes(data)
-        elif isinstance(data, dict):
-            b64 = data.get('image', '')
-            if ',' in b64:
-                b64 = b64.split(',', 1)[1]
-            jpg_bytes = base64.b64decode(b64) if b64 else b''
-        else:
-            return
-        if not jpg_bytes:
-            return
-        result_bytes, face_found, mode = run_swap(jpg_bytes)
-        emit('frame_result', {'image': result_bytes, 'face_found': face_found, 'mode': mode})
+        jpg_bytes = _decode_frame(data)
     except Exception as e:
-        print(f'[WS] frame error: {e}')
+        print(f'[WS] frame decode error: {e}')
         emit('frame_error', {'message': str(e)})
+        return
+    if not jpg_bytes:
+        return
+
+    sid = request.sid
+    with _frame_state_lock:
+        st = _frame_state.setdefault(sid, {'busy': False, 'pending': None})
+        if st['busy']:
+            # A swap is already running for this client — keep only this newest
+            # frame, discarding any earlier one that was still waiting.
+            st['pending'] = jpg_bytes
+            return
+        st['busy'] = True
+
+    # Drain loop: process the current frame, then whatever newest frame arrived
+    # while we were busy, until the queue is empty. Runs in this client's
+    # greenlet; run_swap offloads the CPU work so the event loop stays free.
+    current = jpg_bytes
+    while current is not None:
+        try:
+            result_bytes, face_found, mode = run_swap(current)
+            # Emit binary JPEG directly (no base64 tax) — matches the client's
+            # binary frame_result handler.
+            socketio.emit('frame_result',
+                          {'image': result_bytes, 'face_found': face_found, 'mode': mode},
+                          to=sid)
+        except Exception as e:
+            print(f'[WS] frame error: {e}')
+            socketio.emit('frame_error', {'message': str(e)}, to=sid)
+        with _frame_state_lock:
+            st = _frame_state.get(sid)
+            if st is None:                # client disconnected mid-swap
+                break
+            current = st['pending']
+            st['pending'] = None
+            if current is None:
+                st['busy'] = False
 
 
 @socketio.on('connect')
@@ -510,6 +561,8 @@ def on_connect():
 @socketio.on('disconnect')
 def on_disconnect():
     _drop_rooms_for_sid(request.sid)
+    with _frame_state_lock:
+        _frame_state.pop(request.sid, None)
     print(f'[WS] Client disconnected: {request.sid}')
 
 
