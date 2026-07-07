@@ -1,0 +1,16 @@
+# GPU deployment deps — identical to requirements.txt, but with the CUDA build
+# of onnxruntime. Use this on a host that has an NVIDIA GPU + CUDA 12 + cuDNN.
+#
+# The app auto-detects the GPU at startup (web_pipeline._pick_device) and uses
+# the CUDAExecutionProvider automatically — NO code change is required.
+#
+# If your host has CUDA 11.8 instead of CUDA 12.x, pin: onnxruntime-gpu==1.16.3
+flask>=3.0
+flask-socketio>=5.0
+onnxruntime-gpu>=1.16
+opencv-python-headless>=4.8
+numpy>=1.24
+numexpr>=2.8
+h5py>=3.8
+onnx>=1.14
+eventlet>=0.33
