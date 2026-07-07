@@ -1,0 +1,21 @@
+# GPU deployment deps — mirrors requirements.txt but with the CUDA build of
+# onnxruntime. Target host: NVIDIA GPU + CUDA 12.x + cuDNN (e.g. Google Colab T4).
+#
+# Version strategy: onnxruntime-gpu / numpy are intentionally NOT hard-pinned here
+# because the correct build depends on the host's actual CUDA/cuDNN, which we
+# verify LIVE. colab_gpu.ipynb HARD-STOPS if CUDAExecutionProvider is missing
+# (no silent CPU fallback), so any mismatch is caught immediately and pinned then.
+#   - numpy: floor only, NOT pinned <2. Colab ships numpy 2.x and the app runs on
+#     2.x; forcing <2 would downgrade and break Colab's preinstalled ABI.
+#   - OpenCV: the notebook uninstalls all opencv-* wheels first, then installs the
+#     headless wheel below, to avoid mixed-wheel states on Colab.
+#   - If the host has CUDA 11.8 (not 12.x), pin instead: onnxruntime-gpu==1.16.3
+flask>=3.0
+flask-socketio>=5.0
+onnxruntime-gpu>=1.18
+opencv-python-headless>=4.8
+numpy>=1.24
+numexpr>=2.8
+h5py>=3.8
+onnx>=1.14
+eventlet>=0.33
